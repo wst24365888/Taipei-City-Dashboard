@@ -2,6 +2,8 @@
 package controllers
 
 import (
+	"TaipeiCityDashboardBE/app/services/ai"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tmc/langchaingo/llms"
 )
 
 // NavigationGeoJSONRequest represents the request body for navigation GeoJSON endpoint
@@ -145,7 +148,91 @@ func HandleNavigationGeoJSON(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, response)
+	// ── AI Analysis ───────────────────────────────────────────────────────────
+	// https://docs.twcloud.ai/docs/user-guides/twcc/afs/api-and-parameters/api-parameter-information#模型說明
+
+	// 1. Collect only the properties of each overlapping feature across all files
+	var overlapProps []map[string]interface{}
+	for _, overlap := range response.Overlaps {
+		for _, feat := range overlap.OverlappingFeatures {
+			featMap, ok := feat.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			props, ok := featMap["properties"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			overlapProps = append(overlapProps, props)
+		}
+	}
+
+	for i, j := 0, len(overlapProps)-1; i < j; i, j = i+1, j-1 {
+		overlapProps[i], overlapProps[j] = overlapProps[j], overlapProps[i]
+	}
+
+	// 2. Build prompt from overlap properties
+	propsJSON, err := json.Marshal(overlapProps)
+	if err != nil {
+		log.Printf("[Navigation] 無法序列化 overlap properties: %v", err)
+		propsJSON = []byte("[]")
+	}
+	aiPrompt := fmt.Sprintf("以下是路線經過地區的屬性資料，告訴我哪些路段會下雨：\n%s", string(propsJSON))
+
+	// 3. Session ID — prefer X-Request-ID header; fall back to a new random ID
+	sessionID := c.GetHeader("X-Request-ID")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("nav_%s", generateSimpleID())
+	}
+
+	// 4. Fire the AI request
+	req := ai.AIChatRequest{
+		SessionID: sessionID,
+		IPAddress: c.ClientIP(),
+		Messages: []llms.MessageContent{
+			{
+				Role: llms.ChatMessageTypeHuman,
+				Parts: []llms.ContentPart{
+					llms.TextContent{Text: aiPrompt},
+				},
+			},
+		},
+	}
+
+	logEntry, aiErr := ai.ChatWithTWCC(c.Request.Context(), req)
+	if aiErr != nil {
+		// AI failure is non-fatal — return overlap results without AI analysis
+		log.Printf("[Navigation] AI 分析失敗: %v", aiErr)
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":         response.Status,
+		"message":        response.Message,
+		"ai": gin.H{
+			"session":  logEntry.SessionID,
+			"content":  logEntry.Answer,
+			"usage": gin.H{
+				"input_tokens":  logEntry.InputTokens,
+				"output_tokens": logEntry.OutputTokens,
+				"total_tokens":  logEntry.TotalTokens,
+			},
+			"tool_used":  logEntry.ToolUsed,
+			"latency_ms": logEntry.LatencyMS,
+			"model":      logEntry.Model,
+			"provider":   logEntry.Provider,
+		},
+	})
+}
+
+// generateSimpleID returns a short pseudo-random hex string for session IDs.
+func generateSimpleID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", os.Getpid())
+	}
+	return fmt.Sprintf("%x", b)
 }
 
 // processOverlapDetection finds reference features that the incoming route crosses.
