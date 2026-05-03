@@ -229,6 +229,7 @@ function getNavigationGeoJsonEndpoint() {
 
 function buildSimpleRouteGeoJson(routeData) {
 	return {
+		files: ["future_hour_rain.geojson"],
 		type: "FeatureCollection",
 		features: [
 			{
@@ -449,7 +450,7 @@ function createRainDropDescriptors(data) {
 	const dropCount = Math.round(
 		clampNumber(
 			entries.length * RAIN_ANIMATION_DROP_FACTOR +
-				averageIntensity * RAIN_ANIMATION_AVG_DROP_FACTOR,
+			averageIntensity * RAIN_ANIMATION_AVG_DROP_FACTOR,
 			RAIN_ANIMATION_MIN_DROPS,
 			RAIN_ANIMATION_MAX_DROPS,
 		),
@@ -469,11 +470,11 @@ function createRainDropDescriptors(data) {
 		const lng =
 			entry.bbox.minLng +
 			(entry.bbox.maxLng - entry.bbox.minLng) *
-				seededRandom(index * 7 + 3);
+			seededRandom(index * 7 + 3);
 		const lat =
 			entry.bbox.minLat +
 			(entry.bbox.maxLat - entry.bbox.minLat) *
-				seededRandom(index * 11 + 5);
+			seededRandom(index * 11 + 5);
 		const mercator = mapboxGl.MercatorCoordinate.fromLngLat([lng, lat], 0);
 
 		return {
@@ -815,11 +816,11 @@ function interpolateSimpleRoutePath(routePath, progress) {
 	const lng =
 		segment.from.coordinate[0] +
 		(segment.to.coordinate[0] - segment.from.coordinate[0]) *
-			localProgress;
+		localProgress;
 	const lat =
 		segment.from.coordinate[1] +
 		(segment.to.coordinate[1] - segment.from.coordinate[1]) *
-			localProgress;
+		localProgress;
 
 	return {
 		coordinate: [lng, lat],
@@ -887,7 +888,7 @@ function getRoadSpeedLimitNetworkDelay(isPriority) {
 			0,
 			roadSpeedLimitNetworkCooldownUntil - now,
 			SIMPLE_ROUTE_SPEED_LIMIT_NETWORK_INTERVAL_MS -
-				(now - lastRoadSpeedLimitNetworkRequestStartedAt),
+			(now - lastRoadSpeedLimitNetworkRequestStartedAt),
 		);
 	}
 
@@ -896,7 +897,7 @@ function getRoadSpeedLimitNetworkDelay(isPriority) {
 		roadSpeedLimitNetworkCooldownUntil,
 		nextRoadSpeedLimitPrefetchRequestAt,
 		lastRoadSpeedLimitNetworkRequestStartedAt +
-			SIMPLE_ROUTE_SPEED_LIMIT_NETWORK_INTERVAL_MS,
+		SIMPLE_ROUTE_SPEED_LIMIT_NETWORK_INTERVAL_MS,
 	);
 	nextRoadSpeedLimitPrefetchRequestAt =
 		scheduledAt + SIMPLE_ROUTE_SPEED_LIMIT_NETWORK_INTERVAL_MS;
@@ -1065,8 +1066,8 @@ function createSimpleRouteCarLayer(
 		smoothedFirstPersonBearing: null,
 		shouldUseFirstPersonCamera:
 			options.shouldUseFirstPersonCamera || (() => false),
-		onRouteSample: options.onRouteSample || (() => {}),
-		onRouteComplete: options.onRouteComplete || (() => {}),
+		onRouteSample: options.onRouteSample || (() => { }),
+		onRouteComplete: options.onRouteComplete || (() => { }),
 		pauseAnimation() {
 			if (
 				customLayer.paused ||
@@ -1147,7 +1148,7 @@ function createSimpleRouteCarLayer(
 			if (
 				!force &&
 				elapsedSinceUpdate <
-					SIMPLE_ROUTE_FIRST_PERSON_UPDATE_INTERVAL_MS
+				SIMPLE_ROUTE_FIRST_PERSON_UPDATE_INTERVAL_MS
 			) {
 				return;
 			}
@@ -2456,12 +2457,12 @@ export const useMapStore = defineStore("map", {
 			if (map_config.icon) {
 				extra_paint_configs = {
 					...maplayerCommonPaint[
-						`${map_config.type}-${map_config.icon}`
+					`${map_config.type}-${map_config.icon}`
 					],
 				};
 				extra_layout_configs = {
 					...maplayerCommonLayout[
-						`${map_config.type}-${map_config.icon}`
+					`${map_config.type}-${map_config.icon}`
 					],
 				};
 			}
@@ -2469,13 +2470,13 @@ export const useMapStore = defineStore("map", {
 				extra_paint_configs = {
 					...extra_paint_configs,
 					...maplayerCommonPaint[
-						`${map_config.type}-${map_config.size}`
+					`${map_config.type}-${map_config.size}`
 					],
 				};
 				extra_layout_configs = {
 					...extra_layout_configs,
 					...maplayerCommonLayout[
-						`${map_config.type}-${map_config.size}`
+					`${map_config.type}-${map_config.size}`
 					],
 				};
 			}
@@ -2506,9 +2507,9 @@ export const useMapStore = defineStore("map", {
 			};
 			if (
 				map_config.layerId ===
-					"wee_hazard_water-fill-extrusion-metrotaipei" ||
+				"wee_hazard_water-fill-extrusion-metrotaipei" ||
 				map_config.layerId ===
-					"wee_hazard_water_tp-fill-extrusion-taipei"
+				"wee_hazard_water_tp-fill-extrusion-taipei"
 			) {
 				config.filter = initialFilter;
 			}
@@ -2516,9 +2517,9 @@ export const useMapStore = defineStore("map", {
 			this.addRainAnimationLayer(map_config, sourceData);
 			if (
 				map_config.layerId ===
-					"wee_hazard_water-fill-extrusion-metrotaipei" ||
+				"wee_hazard_water-fill-extrusion-metrotaipei" ||
 				map_config.layerId ===
-					"wee_hazard_water_tp-fill-extrusion-taipei"
+				"wee_hazard_water_tp-fill-extrusion-taipei"
 			)
 				this.animateFilter(map_config.layerId);
 			this.currentLayers.push(map_config.layerId);
@@ -2605,7 +2606,7 @@ export const useMapStore = defineStore("map", {
 				getTargetColor: () => {
 					const color = hexToRGB(
 						paintSettings["arc-color"][1] ||
-							paintSettings["arc-color"][0],
+						paintSettings["arc-color"][0],
 					);
 					return [
 						parseInt(color.r, 16),
@@ -2652,15 +2653,15 @@ export const useMapStore = defineStore("map", {
 				.map((index) => {
 					const l = this.deckGlLayer[index];
 					switch (l.type) {
-					case "ArcLayer":
-						return new ArcLayer(l.config);
-					case "AnimatedArcLayer":
-						return new AnimatedArcLayer({
-							...l.config,
-							coef: this.step / 1000,
-						});
-					default:
-						return null;
+						case "ArcLayer":
+							return new ArcLayer(l.config);
+						case "AnimatedArcLayer":
+							return new AnimatedArcLayer({
+								...l.config,
+								coef: this.step / 1000,
+							});
+						default:
+							return null;
 					}
 				})
 				.filter(Boolean);
@@ -3681,7 +3682,7 @@ export const useMapStore = defineStore("map", {
 				this.setRainAnimationLayerVisibility(mapLayerId, true);
 				if (
 					mapLayerId ===
-						"wee_hazard_water-fill-extrusion-metrotaipei" ||
+					"wee_hazard_water-fill-extrusion-metrotaipei" ||
 					mapLayerId === "wee_hazard_water_tp-fill-extrusion-taipei"
 				) {
 					const filterClass = [
@@ -3744,7 +3745,7 @@ export const useMapStore = defineStore("map", {
 				if (item.type === "symbol-3d") {
 					const customLayer =
 						this.customLayers[
-							`${item.index}-${item.type}-${item.city}`
+						`${item.index}-${item.type}-${item.city}`
 						];
 					if (customLayer?.carTooltip) {
 						customLayer.carTooltip.style.display = "none";
@@ -3924,7 +3925,7 @@ export const useMapStore = defineStore("map", {
 
 						const videoUrl =
 							parsedPopupContent[activeTabValue].properties[
-								videoProperty.key
+							videoProperty.key
 							];
 						if (!videoUrl) {
 							return;
@@ -4395,7 +4396,7 @@ export const useMapStore = defineStore("map", {
 				return (
 					Number.isFinite(distanceMeters) &&
 					distanceMeters <=
-						SIMPLE_ROUTE_SPEED_LIMIT_CACHE_DISTANCE_METERS
+					SIMPLE_ROUTE_SPEED_LIMIT_CACHE_DISTANCE_METERS
 				);
 			});
 
@@ -4456,7 +4457,7 @@ export const useMapStore = defineStore("map", {
 				(coordinate, index, coordinates) =>
 					index === 0 ||
 					getCoordinateLookupKey(coordinate) !==
-						getCoordinateLookupKey(coordinates[index - 1]),
+					getCoordinateLookupKey(coordinates[index - 1]),
 			);
 			this.runSimpleRouteSpeedLimitPrefetch();
 		},
@@ -4586,7 +4587,7 @@ export const useMapStore = defineStore("map", {
 					priority: !options.prefetch,
 					shouldRun: () =>
 						lookupSessionId ===
-							this.roadSpeedLimitLookupSessionId &&
+						this.roadSpeedLimitLookupSessionId &&
 						this.isSimpleRouteCarAnimating &&
 						(options.prefetch ||
 							this.isSimpleRouteFirstPersonCamera),
@@ -4661,7 +4662,7 @@ export const useMapStore = defineStore("map", {
 				this.navigationRouteCarLayer?.applyFirstPersonCamera?.(true);
 				this.scheduleCurrentRoadSpeedLimitLookup(
 					this.navigationRouteCarLayer?.currentSample?.coordinate ||
-						this.navigationRouteCarSample?.coordinate,
+					this.navigationRouteCarSample?.coordinate,
 					{ force: true },
 				);
 				return;
@@ -5170,9 +5171,9 @@ export const useMapStore = defineStore("map", {
 						) {
 							return (
 								d.properties[map_filter.byParam.xParam] ===
-									xParam &&
+								xParam &&
 								d.properties[map_filter.byParam.yParam] ===
-									yParam
+								yParam
 							);
 						} else if (map_filter.byParam.yParam && yParam) {
 							return (
@@ -5363,11 +5364,9 @@ export const useMapStore = defineStore("map", {
 				);
 			} else {
 				const res = await axios.get(
-					`${
-						location.origin
-					}/geo_server/taipei_vioc/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=taipei_vioc%3A${
-						this.mapConfigs[this.currentVisibleLayers[targetLayer]]
-							.index
+					`${location.origin
+					}/geo_server/taipei_vioc/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=taipei_vioc%3A${this.mapConfigs[this.currentVisibleLayers[targetLayer]]
+						.index
 					}&maxFeatures=1000000&outputFormat=application%2Fjson`,
 				);
 
