@@ -142,20 +142,25 @@ const speedLimitSourceLabel = computed(() => {
 	return state.isDefault ? "法定" : "OPEN DATA";
 });
 
-/** 模擬沿路線前進的示意車速（km/h），非 GPS；紅圈為道路速限 */
+/**
+ * 沿路線「預估行程」推算的平均示意車速（km/h），非 GPS。
+ * 使用 navigationRouteSummary：distance（m）、duration（秒，Mapbox 或直線估計），再乘播放倍率。
+ * 紅圈仍為道路速限。
+ */
 const simpleRouteSimulatedSpeedKmh = computed(() => {
-	const dist = mapStore.navigationRouteSummary?.distance;
-	const durMs = mapStore.navigationRouteCarAnimationDurationMs;
+	const summary = mapStore.navigationRouteSummary;
+	const dist = summary?.distance;
+	const durationSec = summary?.duration;
 	const rate = mapStore.simpleRoutePlaybackRate;
 	if (
 		!Number.isFinite(dist) ||
-		!Number.isFinite(durMs) ||
-		durMs <= 0 ||
+		!Number.isFinite(durationSec) ||
+		durationSec <= 0 ||
 		!Number.isFinite(rate)
 	) {
 		return null;
 	}
-	return (dist * 3600 * rate) / durMs;
+	return (dist * 3.6 * rate) / durationSec;
 });
 
 const simpleRouteSimulatedSpeedLabel = computed(() => {
