@@ -218,7 +218,7 @@ func HandleNavigationGeoJSON(c *gin.Context) {
 		log.Printf("[Navigation] 無法序列化 overlap properties: %v", err)
 		propsJSON = []byte("[]")
 	}
-	aiPrompt := fmt.Sprintf("以下是路線經過地區的屬性資料，告訴我哪些路段會下雨：\n%s", string(propsJSON))
+	aiPrompt := fmt.Sprintf("以下是路線經過地區的屬性資料，從起點至終點按順序簡述哪些路段會下雨，並提醒使用者小心駕駛，全文不超過15ㄔㄛ0字：\n%s", string(propsJSON))
 
 	// 3. Session ID — prefer X-Request-ID header; fall back to a new random ID
 	sessionID := c.GetHeader("X-Request-ID")
