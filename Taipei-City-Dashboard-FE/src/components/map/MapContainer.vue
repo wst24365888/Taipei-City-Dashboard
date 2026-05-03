@@ -21,6 +21,8 @@ const dialogStore = useDialogStore();
 const contentStore = useContentStore();
 const route = useRoute();
 const isRoutePanelOpen = ref(false);
+/** 有簡易路線時，收起右上角 VIEW / 平移 / 縮放 / 旋轉區 */
+const isCameraPanelCollapsed = ref(false);
 const routeStart = ref("新北市政府");
 const routeEnd = ref("淡水區");
 const routeProfile = ref("mapbox/driving");
@@ -178,6 +180,14 @@ const simpleRoutePlaybackRateLabel = computed(() => {
 
 const SIMPLE_ROUTE_PLAYBACK_KEY_STEP = 0.25;
 
+/** 攝影機 VIEW/PAN… 展開時高度會壓到簡易導航表單，將表單下移 */
+const shiftNavigationBelowCamera = computed(
+	() =>
+		isRoutePanelOpen.value &&
+		!!mapStore.navigationRouteSummary &&
+		!isCameraPanelCollapsed.value,
+);
+
 function onSimpleRouteDriveKeydown(event) {
 	if (!mapStore.isSimpleRouteFirstPersonCamera) return;
 	if (
@@ -250,6 +260,17 @@ watch(
 	}
 );
 
+watch(
+	() => mapStore.navigationRouteSummary,
+	(summary) => {
+		if (summary) {
+			isCameraPanelCollapsed.value = true;
+		} else {
+			isCameraPanelCollapsed.value = false;
+		}
+	},
+);
+
 onMounted(() => {
 	mapStore.initializeMapBox();
 	route.query.city 
@@ -265,7 +286,12 @@ onUnmounted(() => {
 
 <template>
   <div class="mapcontainer">
-    <div class="mapcontainer-map">
+    <div
+      class="mapcontainer-map"
+      :class="{
+        'mapcontainer-map--nav-below-camera-tools': shiftNavigationBelowCamera,
+      }"
+    >
       <!-- #mapboxBox needs to be empty to ensure Mapbox performance -->
       <div id="mapboxBox" />
       <div class="mapcontainer-layers">
@@ -432,12 +458,43 @@ onUnmounted(() => {
       </div>
       <div
         class="mapcontainer-camera hide-if-mobile"
+        :class="{
+          'mapcontainer-camera--has-route':
+            !!mapStore.navigationRouteSummary,
+          'mapcontainer-camera--motion-collapsed':
+            !!mapStore.navigationRouteSummary &&
+            isCameraPanelCollapsed,
+        }"
         aria-label="地圖攝影機控制"
       >
+        <div
+          v-if="mapStore.navigationRouteSummary"
+          class="mapcontainer-camera-routebar"
+        >
+          <button
+            class="mapcontainer-camera-routebar-toggle"
+            type="button"
+            :aria-expanded="!isCameraPanelCollapsed"
+            :title="
+              isCameraPanelCollapsed
+                ? '展開 VIEW / 平移 / 縮放 / 旋轉'
+                : '收起 VIEW / 平移 / 縮放 / 旋轉'
+            "
+            @click="isCameraPanelCollapsed = !isCameraPanelCollapsed"
+          >
+            <span>{{
+              isCameraPanelCollapsed ? "unfold_more" : "unfold_less"
+            }}</span>
+            <em>{{
+              isCameraPanelCollapsed ? "展開" : "收起"
+            }}</em>
+          </button>
+        </div>
         <div class="mapcontainer-camera-replay">
           <span>ANIM</span>
           <button
             title="重新播放進場動畫"
+            type="button"
             @click="
               mapStore.playInitialMapReveal(
                 mapStore.pendingMapViewCity || 'default',
@@ -462,119 +519,133 @@ onUnmounted(() => {
             <span>navigation</span>
           </button>
         </div>
-        <div class="mapcontainer-camera-angle mapcontainer-camera-section">
-          <div class="mapcontainer-camera-angle-heading">
-            <span>VIEW</span>
-            <strong>
-              {{ cinematicPitchLabel }} {{ cinematicPitchValue }}°
-            </strong>
-          </div>
-          <input
-            :value="mapStore.cinematicPitch"
-            aria-label="地圖視角俯視到斜視"
-            max="72"
-            min="0"
-            step="1"
-            type="range"
-            @input="setCinematicPitch"
-          >
-          <div class="mapcontainer-camera-angle-presets">
-            <button
-              class="mapcontainer-camera-textbutton"
-              title="俯視"
-              @click="mapStore.setCinematicMapPitch(0)"
+        <div class="mapcontainer-camera-motion">
+          <div class="mapcontainer-camera-angle mapcontainer-camera-section">
+            <div class="mapcontainer-camera-angle-heading">
+              <span>VIEW</span>
+              <strong>
+                {{ cinematicPitchLabel }} {{ cinematicPitchValue }}°
+              </strong>
+            </div>
+            <input
+              :value="mapStore.cinematicPitch"
+              aria-label="地圖視角俯視到斜視"
+              max="72"
+              min="0"
+              step="1"
+              type="range"
+              @input="setCinematicPitch"
             >
-              0°
-            </button>
-            <button
-              class="mapcontainer-camera-textbutton"
-              title="中視角"
-              @click="mapStore.setCinematicMapPitch(45)"
-            >
-              45°
-            </button>
-            <button
-              class="mapcontainer-camera-textbutton"
-              title="斜視"
-              @click="mapStore.setCinematicMapPitch(68)"
-            >
-              68°
-            </button>
-          </div>
-        </div>
-        <div class="mapcontainer-camera-move mapcontainer-camera-section">
-          <span class="mapcontainer-camera-label">PAN</span>
-          <div class="mapcontainer-camera-pad">
-            <button
-              class="mapcontainer-camera-pan-up"
-              title="向上平移"
-              @click="mapStore.panCinematicMap('up')"
-            >
-              <span>keyboard_arrow_up</span>
-            </button>
-            <button
-              class="mapcontainer-camera-pan-left"
-              title="向左平移"
-              @click="mapStore.panCinematicMap('left')"
-            >
-              <span>keyboard_arrow_left</span>
-            </button>
-            <button
-              class="mapcontainer-camera-pan-reset"
-              title="回到目前城市視角"
-              @click="mapStore.resetCinematicMapView()"
-            >
-              <span>my_location</span>
-            </button>
-            <button
-              class="mapcontainer-camera-pan-right"
-              title="向右平移"
-              @click="mapStore.panCinematicMap('right')"
-            >
-              <span>keyboard_arrow_right</span>
-            </button>
-            <button
-              class="mapcontainer-camera-pan-down"
-              title="向下平移"
-              @click="mapStore.panCinematicMap('down')"
-            >
-              <span>keyboard_arrow_down</span>
-            </button>
-          </div>
-        </div>
-        <div class="mapcontainer-camera-tools mapcontainer-camera-section">
-          <div class="mapcontainer-camera-tools-row">
-            <span>ZOOM</span>
-            <div class="mapcontainer-camera-group">
+            <div class="mapcontainer-camera-angle-presets">
               <button
-                title="放大"
-                @click="mapStore.zoomCinematicMap(0.8)"
+                class="mapcontainer-camera-textbutton"
+                title="俯視"
+                type="button"
+                @click="mapStore.setCinematicMapPitch(0)"
               >
-                <span>zoom_in</span>
+                0°
               </button>
               <button
-                title="縮小"
-                @click="mapStore.zoomCinematicMap(-0.8)"
+                class="mapcontainer-camera-textbutton"
+                title="中視角"
+                type="button"
+                @click="mapStore.setCinematicMapPitch(45)"
               >
-                <span>zoom_out</span>
+                45°
+              </button>
+              <button
+                class="mapcontainer-camera-textbutton"
+                title="斜視"
+                type="button"
+                @click="mapStore.setCinematicMapPitch(68)"
+              >
+                68°
               </button>
             </div>
           </div>
-          <div class="mapcontainer-camera-tools-row">
-            <span>ROT</span>
-            <div class="mapcontainer-camera-group">
+          <div class="mapcontainer-camera-move mapcontainer-camera-section">
+            <span class="mapcontainer-camera-label">PAN</span>
+            <div class="mapcontainer-camera-pad">
               <button
-                title="逆時針旋轉"
-                @click="mapStore.rotateCinematicMap(-24)"
+                class="mapcontainer-camera-pan-up"
+                title="向上平移"
+                type="button"
+                @click="mapStore.panCinematicMap('up')"
               >
-                <span>rotate_left</span>
+                <span>keyboard_arrow_up</span>
               </button>
               <button
-                title="順時針旋轉"
-                @click="mapStore.rotateCinematicMap(24)"
+                class="mapcontainer-camera-pan-left"
+                title="向左平移"
+                type="button"
+                @click="mapStore.panCinematicMap('left')"
               >
-                <span>rotate_right</span>
+                <span>keyboard_arrow_left</span>
               </button>
+              <button
+                class="mapcontainer-camera-pan-reset"
+                title="回到目前城市視角"
+                type="button"
+                @click="mapStore.resetCinematicMapView()"
+              >
+                <span>my_location</span>
+              </button>
+              <button
+                class="mapcontainer-camera-pan-right"
+                title="向右平移"
+                type="button"
+                @click="mapStore.panCinematicMap('right')"
+              >
+                <span>keyboard_arrow_right</span>
+              </button>
+              <button
+                class="mapcontainer-camera-pan-down"
+                title="向下平移"
+                type="button"
+                @click="mapStore.panCinematicMap('down')"
+              >
+                <span>keyboard_arrow_down</span>
+              </button>
+            </div>
+          </div>
+          <div class="mapcontainer-camera-tools mapcontainer-camera-section">
+            <div class="mapcontainer-camera-tools-row">
+              <span>ZOOM</span>
+              <div class="mapcontainer-camera-group">
+                <button
+                  title="放大"
+                  type="button"
+                  @click="mapStore.zoomCinematicMap(0.8)"
+                >
+                  <span>zoom_in</span>
+                </button>
+                <button
+                  title="縮小"
+                  type="button"
+                  @click="mapStore.zoomCinematicMap(-0.8)"
+                >
+                  <span>zoom_out</span>
+                </button>
+              </div>
+            </div>
+            <div class="mapcontainer-camera-tools-row">
+              <span>ROT</span>
+              <div class="mapcontainer-camera-group">
+                <button
+                  title="逆時針旋轉"
+                  type="button"
+                  @click="mapStore.rotateCinematicMap(-24)"
+                >
+                  <span>rotate_left</span>
+                </button>
+                <button
+                  title="順時針旋轉"
+                  type="button"
+                  @click="mapStore.rotateCinematicMap(24)"
+                >
+                  <span>rotate_right</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -675,6 +746,11 @@ onUnmounted(() => {
 		&::before,
 		&::after {
 			display: none;
+		}
+
+		&--nav-below-camera-tools .mapcontainer-navigation {
+			top: 252px;
+			max-height: calc(100% - 276px);
 		}
 	}
 
@@ -1162,7 +1238,8 @@ onUnmounted(() => {
 		right: 24px;
 		z-index: 6;
 		display: grid;
-		grid-template-columns: 60px 60px minmax(172px, 1fr) 126px 118px;
+		grid-template-columns: 60px 60px minmax(280px, 1fr);
+		grid-template-rows: auto;
 		gap: 10px;
 		align-items: stretch;
 		width: min(630px, calc(100vw - 500px));
@@ -1172,6 +1249,76 @@ onUnmounted(() => {
 		background-color: rgba(0, 0, 0, 0.66);
 		box-shadow: 0 0 24px rgba(255, 255, 255, 0.12);
 		backdrop-filter: blur(4px);
+
+		&--has-route {
+			grid-template-rows: auto auto;
+		}
+
+		&--motion-collapsed {
+			grid-template-columns: 60px 60px;
+			width: auto;
+			min-width: 0;
+
+			.mapcontainer-camera-motion {
+				display: none;
+			}
+		}
+
+		&-routebar {
+			grid-column: 1 / -1;
+			display: flex;
+			justify-content: flex-end;
+			align-items: center;
+			margin: -4px 0 -2px;
+		}
+
+		&-routebar-toggle {
+			width: auto;
+			min-width: 4.5rem;
+			height: 26px;
+			padding: 0 8px;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			gap: 5px;
+			border: 1px solid rgba(244, 242, 235, 0.42);
+			background-color: rgba(255, 255, 255, 0.06);
+			color: rgba(244, 242, 235, 0.9);
+			font-family: Consolas, "Courier New", monospace;
+			cursor: pointer;
+			transition:
+				border-color 0.18s,
+				background-color 0.18s,
+				color 0.18s;
+
+			span {
+				font-family: var(--font-icon);
+				font-size: 1.05rem;
+				line-height: 1;
+				user-select: none;
+			}
+
+			em {
+				font-style: normal;
+				font-size: 0.64rem;
+				font-weight: 800;
+				letter-spacing: 0.02em;
+			}
+
+			&:hover {
+				border-color: rgba(255, 78, 203, 0.88);
+				background-color: rgba(255, 78, 203, 0.16);
+				color: #fff;
+			}
+		}
+
+		&-motion {
+			display: grid;
+			grid-template-columns: minmax(172px, 1fr) 126px 118px;
+			gap: 10px;
+			align-items: stretch;
+			min-width: 0;
+		}
 
 		&-section,
 		&-replay,
