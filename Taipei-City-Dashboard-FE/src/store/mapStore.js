@@ -168,6 +168,8 @@ const SIMPLE_ROUTE_CAR_MAX_SCALE = 7;
 const SIMPLE_ROUTE_CAR_MIN_DURATION_MS = 14000;
 const SIMPLE_ROUTE_CAR_MAX_DURATION_MS = 60000;
 const SIMPLE_ROUTE_CAR_MS_PER_METER = 4.4;
+const SIMPLE_ROUTE_PLAYBACK_RATE_MIN = 0.25;
+const SIMPLE_ROUTE_PLAYBACK_RATE_MAX = 6;
 const SIMPLE_ROUTE_FIRST_PERSON_FORWARD_METERS = 0;
 const SIMPLE_ROUTE_FIRST_PERSON_PITCH = 78;
 const SIMPLE_ROUTE_FIRST_PERSON_ZOOM = 17.2;
@@ -1022,12 +1024,79 @@ function createSimpleRouteCarLayer(
 		modelLengthUnits: 1,
 		isRemoved: false,
 		hasCompleted: false,
+		paused: false,
+		pauseFrozenElapsed: 0,
+		playbackRate: 1,
 		lastFirstPersonCameraUpdate: 0,
 		smoothedFirstPersonBearing: null,
 		shouldUseFirstPersonCamera:
 			options.shouldUseFirstPersonCamera || (() => false),
 		onRouteSample: options.onRouteSample || (() => {}),
 		onRouteComplete: options.onRouteComplete || (() => {}),
+		pauseAnimation() {
+			if (
+				customLayer.paused ||
+				customLayer.hasCompleted ||
+				customLayer.isRemoved
+			) {
+				return false;
+			}
+			const rate = customLayer.playbackRate || 1;
+			const elapsed = performance.now() - customLayer.startedAt;
+			if (
+				(elapsed * rate) / customLayer.animationDuration >=
+				1 - Number.EPSILON
+			) {
+				return false;
+			}
+			customLayer.pauseFrozenElapsed = elapsed;
+			customLayer.paused = true;
+			return true;
+		},
+		resumeAnimation() {
+			if (!customLayer.paused || customLayer.isRemoved) {
+				return false;
+			}
+			customLayer.startedAt =
+				performance.now() - customLayer.pauseFrozenElapsed;
+			customLayer.paused = false;
+			customLayer.pauseFrozenElapsed = 0;
+			customLayer.map?.triggerRepaint();
+			return true;
+		},
+		setPlaybackRate(nextRate) {
+			const clamped = clampNumber(
+				nextRate,
+				SIMPLE_ROUTE_PLAYBACK_RATE_MIN,
+				SIMPLE_ROUTE_PLAYBACK_RATE_MAX,
+			);
+			const oldRate = customLayer.playbackRate || 1;
+			if (
+				clamped === oldRate ||
+				customLayer.hasCompleted ||
+				customLayer.isRemoved
+			) {
+				return clamped;
+			}
+			const D = customLayer.animationDuration;
+			const now = performance.now();
+			const wallElapsed = customLayer.paused
+				? customLayer.pauseFrozenElapsed
+				: now - customLayer.startedAt;
+			const progress = clampNumber((wallElapsed * oldRate) / D, 0, 1);
+			if (progress >= 1) {
+				return oldRate;
+			}
+			const newWallElapsed = (progress * D) / clamped;
+			customLayer.playbackRate = clamped;
+			if (customLayer.paused) {
+				customLayer.pauseFrozenElapsed = newWallElapsed;
+			} else {
+				customLayer.startedAt = now - newWallElapsed;
+			}
+			customLayer.map?.triggerRepaint();
+			return clamped;
+		},
 		applyFirstPersonCamera(force = false) {
 			if (
 				!customLayer.map ||
@@ -1144,9 +1213,12 @@ function createSimpleRouteCarLayer(
 				return;
 			}
 
+			const rate = customLayer.playbackRate || 1;
+			const elapsed = customLayer.paused
+				? customLayer.pauseFrozenElapsed
+				: performance.now() - customLayer.startedAt;
 			const progress = clampNumber(
-				(performance.now() - customLayer.startedAt) /
-					customLayer.animationDuration,
+				(elapsed * rate) / customLayer.animationDuration,
 				0,
 				1,
 			);
@@ -1221,13 +1293,15 @@ function createSimpleRouteCarLayer(
 			if (progress >= 1 && !customLayer.hasCompleted) {
 				customLayer.hasCompleted = true;
 				customLayer.currentSample = routeSample;
+				customLayer.paused = false;
+				customLayer.pauseFrozenElapsed = 0;
 				if (isFirstPersonCamera) {
 					customLayer.applyFirstPersonCamera();
 				}
 				customLayer.onRouteComplete(routeSample);
 			}
 
-			if (progress < 1 || !customLayer.model) {
+			if ((!customLayer.paused && progress < 1) || !customLayer.model) {
 				customLayer.map.triggerRepaint();
 			}
 		},
@@ -1341,6 +1415,10 @@ export const useMapStore = defineStore("map", {
 		roadSpeedLimitPrefetchQueue: [],
 		roadSpeedLimitPrefetchTimer: null,
 		isSimpleRouteCarAnimating: false,
+		isSimpleRouteAnimationPaused: false,
+		isSimpleRouteCarAnimationComplete: false,
+		simpleRoutePlaybackRate: 1,
+		navigationRouteCarAnimationDurationMs: 0,
 	}),
 	actions: {
 		/* Initialize Mapbox */
@@ -1372,6 +1450,10 @@ export const useMapStore = defineStore("map", {
 			this.isSimpleRouteCarAnimating = false;
 			this.simpleRouteCameraSnapshot = null;
 			this.resetCurrentRoadSpeedLimit();
+			this.isSimpleRouteAnimationPaused = false;
+			this.isSimpleRouteCarAnimationComplete = false;
+			this.simpleRoutePlaybackRate = 1;
+			this.navigationRouteCarAnimationDurationMs = 0;
 			this.cinematicPitch = MapObjectConfig.pitch;
 			const MAPBOXTOKEN = import.meta.env.VITE_MAPBOXTOKEN;
 			mapboxGl.accessToken = MAPBOXTOKEN;
@@ -4500,6 +4582,31 @@ export const useMapStore = defineStore("map", {
 				!this.isSimpleRouteFirstPersonCamera,
 			);
 		},
+		toggleSimpleRouteAnimationPause() {
+			const layer = this.navigationRouteCarLayer;
+			if (!layer || this.isSimpleRouteCarAnimationComplete) return;
+			if (layer.paused) {
+				layer.resumeAnimation();
+				this.isSimpleRouteAnimationPaused = false;
+				return;
+			}
+			if (layer.pauseAnimation()) {
+				this.isSimpleRouteAnimationPaused = true;
+			}
+		},
+		adjustSimpleRoutePlaybackRate(delta) {
+			const layer = this.navigationRouteCarLayer;
+			if (
+				!layer ||
+				layer.hasCompleted ||
+				this.isSimpleRouteCarAnimationComplete
+			) {
+				return;
+			}
+			const current = layer.playbackRate || 1;
+			layer.setPlaybackRate(current + Number(delta));
+			this.simpleRoutePlaybackRate = layer.playbackRate || 1;
+		},
 		renderSimpleRouteCar(routeData) {
 			if (!this.map || !routeData?.geometry?.coordinates?.length) {
 				return;
@@ -4536,6 +4643,10 @@ export const useMapStore = defineStore("map", {
 				this.navigationRouteCarAnimationFrame = null;
 			}
 
+			this.isSimpleRouteAnimationPaused = false;
+			this.isSimpleRouteCarAnimationComplete = false;
+			this.simpleRoutePlaybackRate = 1;
+			this.navigationRouteCarAnimationDurationMs = animationDuration;
 			const carLayer = createSimpleRouteCarLayer(
 				routePath,
 				animationDuration,
@@ -4553,6 +4664,8 @@ export const useMapStore = defineStore("map", {
 					onRouteComplete: (routeSample) => {
 						this.navigationRouteCarSample = routeSample;
 						this.isSimpleRouteCarAnimating = false;
+						this.isSimpleRouteAnimationPaused = false;
+						this.isSimpleRouteCarAnimationComplete = true;
 						this.finishCurrentRoadSpeedLimitLookup();
 					},
 				},
@@ -4774,6 +4887,10 @@ export const useMapStore = defineStore("map", {
 				this.isSimpleRouteFirstPersonCamera = false;
 				this.simpleRouteCameraSnapshot = null;
 			}
+			this.isSimpleRouteAnimationPaused = false;
+			this.isSimpleRouteCarAnimationComplete = false;
+			this.simpleRoutePlaybackRate = 1;
+			this.navigationRouteCarAnimationDurationMs = 0;
 		},
 
 		/* Functions that change the viewing experience of the map */

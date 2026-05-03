@@ -2,7 +2,7 @@
 
 <script setup>
 /* global gtag */
-import { onMounted, computed, ref, watch } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useAuthStore } from "../../store/authStore";
 import { useContentStore } from "../../store/contentStore";
@@ -32,11 +32,11 @@ const routeProfileOptions = [
 		icon: "directions_car",
 		value: "mapbox/driving",
 	},
-	{
-		label: "步行",
-		icon: "directions_walk",
-		value: "mapbox/walking",
-	},
+	// {
+	// 	label: "步行",
+	// 	icon: "directions_walk",
+	// 	value: "mapbox/walking",
+	// },
 	{
 		label: "單車",
 		icon: "directions_bike",
@@ -142,6 +142,63 @@ const speedLimitSourceLabel = computed(() => {
 	return state.isDefault ? "法定" : "OPEN DATA";
 });
 
+/** 模擬沿路線前進的示意車速（km/h），非 GPS；紅圈為道路速限 */
+const simpleRouteSimulatedSpeedKmh = computed(() => {
+	const dist = mapStore.navigationRouteSummary?.distance;
+	const durMs = mapStore.navigationRouteCarAnimationDurationMs;
+	const rate = mapStore.simpleRoutePlaybackRate;
+	if (
+		!Number.isFinite(dist) ||
+		!Number.isFinite(durMs) ||
+		durMs <= 0 ||
+		!Number.isFinite(rate)
+	) {
+		return null;
+	}
+	return (dist * 3600 * rate) / durMs;
+});
+
+const simpleRouteSimulatedSpeedLabel = computed(() => {
+	const v = simpleRouteSimulatedSpeedKmh.value;
+	if (!Number.isFinite(v)) return "";
+	return `${Math.round(v)} km/h`;
+});
+
+const simpleRoutePlaybackRateLabel = computed(() => {
+	const r = mapStore.simpleRoutePlaybackRate;
+	if (!Number.isFinite(r)) return "1";
+	const t = r.toFixed(2);
+	return t.replace(/\.?0+$/, "") || "0";
+});
+
+const SIMPLE_ROUTE_PLAYBACK_KEY_STEP = 0.25;
+
+function onSimpleRouteDriveKeydown(event) {
+	if (!mapStore.isSimpleRouteFirstPersonCamera) return;
+	if (
+		!mapStore.navigationRouteSummary ||
+		mapStore.isSimpleRouteCarAnimationComplete
+	) {
+		return;
+	}
+	const tag = event.target?.tagName;
+	if (
+		tag === "INPUT" ||
+		tag === "TEXTAREA" ||
+		tag === "SELECT" ||
+		event.target?.isContentEditable
+	) {
+		return;
+	}
+	if (event.key === "ArrowUp") {
+		event.preventDefault();
+		mapStore.adjustSimpleRoutePlaybackRate(SIMPLE_ROUTE_PLAYBACK_KEY_STEP);
+	} else if (event.key === "ArrowDown") {
+		event.preventDefault();
+		mapStore.adjustSimpleRoutePlaybackRate(-SIMPLE_ROUTE_PLAYBACK_KEY_STEP);
+	}
+}
+
 function toggleRoutePanel() {
 	isRoutePanelOpen.value = !isRoutePanelOpen.value;
 }
@@ -193,6 +250,11 @@ onMounted(() => {
 	route.query.city 
 		? mapStore.updateMapViewForCity(route.query.city)
 		: mapStore.updateMapViewForCity('default');
+	window.addEventListener("keydown", onSimpleRouteDriveKeydown);
+});
+
+onUnmounted(() => {
+	window.removeEventListener("keydown", onSimpleRouteDriveKeydown);
 });
 </script>
 
@@ -262,21 +324,56 @@ onMounted(() => {
         </div>
         <div class="mapcontainer-navigation-view">
           <span>VIEW</span>
-          <button
-            class="mapcontainer-navigation-view-toggle"
-            :aria-pressed="mapStore.isSimpleRouteFirstPersonCamera"
-            :class="{
-              'mapcontainer-navigation-view-toggle--active':
-                mapStore.isSimpleRouteFirstPersonCamera,
-            }"
-            title="第一人稱視角"
-            type="button"
-            @click="mapStore.toggleSimpleRouteFirstPersonCamera()"
-          >
-            <span>videocam</span>
-            第一人稱
-          </button>
+          <div class="mapcontainer-navigation-view-actions">
+            <button
+              class="mapcontainer-navigation-view-toggle"
+              :aria-pressed="mapStore.isSimpleRouteFirstPersonCamera"
+              :class="{
+                'mapcontainer-navigation-view-toggle--active':
+                  mapStore.isSimpleRouteFirstPersonCamera,
+              }"
+              title="第一人稱視角"
+              type="button"
+              @click="mapStore.toggleSimpleRouteFirstPersonCamera()"
+            >
+              <span>videocam</span>
+              第一人稱
+            </button>
+            <button
+              class="mapcontainer-navigation-view-toggle"
+              :aria-pressed="mapStore.isSimpleRouteAnimationPaused"
+              :class="{
+                'mapcontainer-navigation-view-toggle--active':
+                  mapStore.isSimpleRouteAnimationPaused,
+              }"
+              :disabled="mapStore.isSimpleRouteCarAnimationComplete"
+              :title="
+                mapStore.isSimpleRouteCarAnimationComplete
+                  ? '動畫已結束'
+                  : mapStore.isSimpleRouteAnimationPaused
+                    ? '繼續沿路線前進'
+                    : '暫停沿路線前進'
+              "
+              type="button"
+              @click="mapStore.toggleSimpleRouteAnimationPause()"
+            >
+              <span>{{
+                mapStore.isSimpleRouteAnimationPaused
+                  ? "play_arrow"
+                  : "pause"
+              }}</span>
+              {{
+                mapStore.isSimpleRouteAnimationPaused ? "繼續" : "暫停"
+              }}
+            </button>
+          </div>
         </div>
+        <p
+          v-if="mapStore.navigationRouteSummary"
+          class="mapcontainer-navigation-drivehint"
+        >
+          第一人稱時：↑ 加速、↓ 減速（鍵盤）
+        </p>
         <div class="mapcontainer-navigation-actions">
           <button
             class="mapcontainer-navigation-submit"
@@ -318,6 +415,14 @@ onMounted(() => {
             {{ speedLimitDetailValue }}
           </em>
           <small v-if="speedLimitUnit">{{ speedLimitUnit }}</small>
+          <small
+            v-if="simpleRouteSimulatedSpeedLabel"
+            class="mapcontainer-speedlimit-sim"
+          >
+            示意車速 {{ simpleRouteSimulatedSpeedLabel }}（×{{
+              simpleRoutePlaybackRateLabel
+            }}）
+          </small>
         </div>
       </div>
       <div
@@ -837,6 +942,13 @@ onMounted(() => {
 				font-weight: 700;
 			}
 
+			&-actions {
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+				gap: 6px;
+				min-width: 0;
+			}
+
 			&-toggle {
 				height: 34px;
 				display: flex;
@@ -865,7 +977,20 @@ onMounted(() => {
 					background-color: rgba(255, 78, 203, 0.2);
 					color: #fff;
 				}
+
+				&:disabled {
+					opacity: 0.45;
+					cursor: not-allowed;
+				}
 			}
+		}
+
+		&-drivehint {
+			margin: 0;
+			color: rgba(244, 242, 235, 0.5);
+			font-size: 0.62rem;
+			font-weight: 700;
+			line-height: 1.35;
 		}
 
 		&-actions {
@@ -1018,6 +1143,10 @@ onMounted(() => {
 				font-weight: 800;
 				line-height: 1.2;
 				overflow-wrap: anywhere;
+			}
+
+			small.mapcontainer-speedlimit-sim {
+				color: rgba(130, 255, 200, 0.95);
 			}
 		}
 	}
