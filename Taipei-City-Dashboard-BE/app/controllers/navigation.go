@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -43,22 +42,6 @@ type OverlapResult struct {
 	ReferenceFile       string        `json:"reference_file"`
 	OverlappingFeatures []interface{} `json:"overlapping_features"` // Reference features crossed by the route
 	OverlapCount        int           `json:"overlap_count"`
-}
-
-type NavigationAIContext struct {
-	Route        NavigationAIRouteSegment  `json:"route"`
-	RainSegments []NavigationAIRainSegment `json:"rain_segments"`
-}
-
-type NavigationAIRouteSegment struct {
-	Start string `json:"start,omitempty"`
-	End   string `json:"end,omitempty"`
-}
-
-type NavigationAIRainSegment struct {
-	Start string      `json:"start,omitempty"`
-	End   string      `json:"end,omitempty"`
-	Rain  interface{} `json:"rain,omitempty"`
 }
 
 // Cache for loaded GeoJSON files to avoid repeated disk reads
@@ -209,25 +192,41 @@ func HandleNavigationGeoJSON(c *gin.Context) {
 	// ── AI Analysis ───────────────────────────────────────────────────────────
 	// https://docs.twcloud.ai/docs/user-guides/twcc/afs/api-and-parameters/api-parameter-information#模型說明
 
-	// 1. Build a minimal AI context: route endpoints plus rain amount per crossed segment.
-	aiContext := buildNavigationAIContext(response.Properties, response.Overlaps)
-	aiContextJSON, err := json.Marshal(aiContext)
-	if err != nil {
-		log.Printf("[Navigation] 無法序列化 AI context: %v", err)
-		aiContextJSON = []byte(`{"route":{},"rain_segments":[]}`)
+	// 1. Collect only the properties of each overlapping feature across all files
+	var overlapProps []map[string]interface{}
+	for _, overlap := range response.Overlaps {
+		for _, feat := range overlap.OverlappingFeatures {
+			featMap, ok := feat.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			props, ok := featMap["properties"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			overlapProps = append(overlapProps, props)
+		}
 	}
-	aiPrompt := fmt.Sprintf(
-		"以下 JSON 只包含導航路線起訖與沿線雨量資訊。請只根據這些資料判斷哪些路段會下雨，回覆精簡中文摘要：\n%s",
-		string(aiContextJSON),
-	)
 
-	// 2. Session ID — prefer X-Request-ID header; fall back to a new random ID
+	for i, j := 0, len(overlapProps)-1; i < j; i, j = i+1, j-1 {
+		overlapProps[i], overlapProps[j] = overlapProps[j], overlapProps[i]
+	}
+
+	// 2. Build prompt from overlap properties
+	propsJSON, err := json.Marshal(overlapProps)
+	if err != nil {
+		log.Printf("[Navigation] 無法序列化 overlap properties: %v", err)
+		propsJSON = []byte("[]")
+	}
+	aiPrompt := fmt.Sprintf("以下是路線經過地區的屬性資料，從起點至終點按輸入的順序簡述哪些路段會下雨，並根據降水量提醒使用者小心駕駛，全文不超過150字：\n%s", string(propsJSON))
+
+	// 3. Session ID — prefer X-Request-ID header; fall back to a new random ID
 	sessionID := c.GetHeader("X-Request-ID")
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("nav_%s", generateSimpleID())
 	}
 
-	// 3. Fire the AI request
+	// 4. Fire the AI request
 	req := ai.AIChatRequest{
 		SessionID: sessionID,
 		IPAddress: c.ClientIP(),
@@ -275,193 +274,6 @@ func generateSimpleID() string {
 		return fmt.Sprintf("%d", os.Getpid())
 	}
 	return fmt.Sprintf("%x", b)
-}
-
-func buildNavigationAIContext(routeProperties map[string]interface{}, overlaps []OverlapResult) NavigationAIContext {
-	context := NavigationAIContext{
-		Route: NavigationAIRouteSegment{
-			Start: stringifyPropertyValue(pickRouteStart(routeProperties)),
-			End:   stringifyPropertyValue(pickRouteEnd(routeProperties)),
-		},
-		RainSegments: make([]NavigationAIRainSegment, 0),
-	}
-
-	for _, overlap := range overlaps {
-		for _, feat := range overlap.OverlappingFeatures {
-			featMap, ok := feat.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			props, ok := featMap["properties"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			segment := NavigationAIRainSegment{
-				Start: stringifyPropertyValue(pickSegmentStart(props)),
-				End:   stringifyPropertyValue(pickSegmentEnd(props)),
-				Rain:  pickRainAmount(props),
-			}
-			if segment.Start == "" && segment.End == "" && segment.Rain == nil {
-				continue
-			}
-			context.RainSegments = append(context.RainSegments, segment)
-		}
-	}
-
-	for i, j := 0, len(context.RainSegments)-1; i < j; i, j = i+1, j-1 {
-		context.RainSegments[i], context.RainSegments[j] = context.RainSegments[j], context.RainSegments[i]
-	}
-
-	return context
-}
-
-func pickRouteStart(properties map[string]interface{}) interface{} {
-	return pickPropertyValue(properties, []string{
-		"start_name",
-		"start",
-		"origin",
-		"from",
-		"起點",
-		"出發地",
-	})
-}
-
-func pickRouteEnd(properties map[string]interface{}) interface{} {
-	return pickPropertyValue(properties, []string{
-		"end_name",
-		"end",
-		"destination",
-		"to",
-		"終點",
-		"迄點",
-		"目的地",
-	})
-}
-
-func pickSegmentStart(properties map[string]interface{}) interface{} {
-	return pickPropertyValue(properties, []string{
-		"segment_start",
-		"road_start",
-		"section_start",
-		"start_name",
-		"start",
-		"from",
-		"起點",
-		"路段起點",
-		"起始路段",
-		"起始",
-	})
-}
-
-func pickSegmentEnd(properties map[string]interface{}) interface{} {
-	return pickPropertyValue(properties, []string{
-		"segment_end",
-		"road_end",
-		"section_end",
-		"end_name",
-		"end",
-		"to",
-		"終點",
-		"迄點",
-		"路段終點",
-		"結束路段",
-		"結束",
-	})
-}
-
-func pickRainAmount(properties map[string]interface{}) interface{} {
-	return pickPropertyValue(properties, []string{
-		"rain",
-		"rainfall",
-		"rain_amount",
-		"rainfall_amount",
-		"rainfall_mm",
-		"precipitation",
-		"precip",
-		"雨量",
-		"降雨",
-		"降雨量",
-		"累積雨量",
-	})
-}
-
-func pickPropertyValue(properties map[string]interface{}, candidates []string) interface{} {
-	if properties == nil {
-		return nil
-	}
-
-	for _, candidate := range candidates {
-		if value, exists := properties[candidate]; exists && !isEmptyPropertyValue(value) {
-			return value
-		}
-	}
-
-	for key, value := range properties {
-		if isEmptyPropertyValue(value) {
-			continue
-		}
-		normalizedKey := normalizePropertyKey(key)
-		for _, candidate := range candidates {
-			if normalizedKey == normalizePropertyKey(candidate) {
-				return value
-			}
-		}
-	}
-
-	for key, value := range properties {
-		if isEmptyPropertyValue(value) {
-			continue
-		}
-		normalizedKey := normalizePropertyKey(key)
-		for _, candidate := range candidates {
-			normalizedCandidate := normalizePropertyKey(candidate)
-			if shouldUsePartialPropertyMatch(normalizedCandidate) &&
-				strings.Contains(normalizedKey, normalizedCandidate) {
-				return value
-			}
-		}
-	}
-
-	return nil
-}
-
-func normalizePropertyKey(key string) string {
-	replacer := strings.NewReplacer("_", "", "-", "", " ", "", "/", "")
-	return strings.ToLower(replacer.Replace(key))
-}
-
-func shouldUsePartialPropertyMatch(candidate string) bool {
-	switch candidate {
-	case "", "start", "end", "from", "to", "rain":
-		return false
-	default:
-		return true
-	}
-}
-
-func isEmptyPropertyValue(value interface{}) bool {
-	if value == nil {
-		return true
-	}
-	if text, ok := value.(string); ok {
-		return strings.TrimSpace(text) == ""
-	}
-	return false
-}
-
-func stringifyPropertyValue(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	switch typedValue := value.(type) {
-	case string:
-		return strings.TrimSpace(typedValue)
-	case fmt.Stringer:
-		return strings.TrimSpace(typedValue.String())
-	default:
-		return strings.TrimSpace(fmt.Sprint(typedValue))
-	}
 }
 
 // processOverlapDetection finds reference features that the incoming route crosses.
