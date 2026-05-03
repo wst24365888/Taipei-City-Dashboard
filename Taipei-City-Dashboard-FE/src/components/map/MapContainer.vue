@@ -2,7 +2,7 @@
 
 <script setup>
 /* global gtag */
-import { onMounted, onUnmounted, computed, ref, watch } from "vue";
+import { onMounted, onUnmounted, computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useAuthStore } from "../../store/authStore";
 import { useContentStore } from "../../store/contentStore";
@@ -21,8 +21,14 @@ const dialogStore = useDialogStore();
 const contentStore = useContentStore();
 const route = useRoute();
 const isRoutePanelOpen = ref(false);
-/** 有簡易路線時，收起右上角 VIEW / 平移 / 縮放 / 旋轉區 */
-const isCameraPanelCollapsed = ref(false);
+/** 收起右上角 VIEW / 平移 / 縮放 / 旋轉區 */
+const isCameraPanelCollapsed = ref(true);
+const cameraPanelRef = ref(null);
+const navigationPanelTop = ref(202);
+const navigationPanelStyle = computed(() => ({
+	top: `${navigationPanelTop.value}px`,
+	maxHeight: `calc(100% - ${navigationPanelTop.value + 24}px)`,
+}));
 const routeStart = ref("新北市政府");
 const routeEnd = ref("淡水區");
 const routeProfile = ref("mapbox/driving");
@@ -40,8 +46,8 @@ const routeProfileOptions = [
 	// 	value: "mapbox/walking",
 	// },
 	{
-		label: "單車",
-		icon: "directions_bike",
+		label: "機車",
+		icon: "two_wheeler",
 		value: "mapbox/cycling",
 	},
 ];
@@ -179,14 +185,20 @@ const simpleRoutePlaybackRateLabel = computed(() => {
 });
 
 const SIMPLE_ROUTE_PLAYBACK_KEY_STEP = 0.25;
+const CAMERA_NAVIGATION_GAP = 16;
+let cameraPanelResizeObserver;
 
-/** 攝影機 VIEW/PAN… 展開時高度會壓到簡易導航表單，將表單下移 */
-const shiftNavigationBelowCamera = computed(
-	() =>
-		isRoutePanelOpen.value &&
-		!!mapStore.navigationRouteSummary &&
-		!isCameraPanelCollapsed.value,
-);
+function updateNavigationPanelTop() {
+	const cameraPanel = cameraPanelRef.value;
+	if (!cameraPanel) return;
+	const mapPanel = cameraPanel.closest(".mapcontainer-map");
+	const cameraRect = cameraPanel.getBoundingClientRect();
+	const mapRect = mapPanel?.getBoundingClientRect();
+	const mapTop = mapRect?.top || 0;
+	navigationPanelTop.value = Math.ceil(
+		cameraRect.bottom - mapTop + CAMERA_NAVIGATION_GAP,
+	);
+}
 
 function onSimpleRouteDriveKeydown(event) {
 	if (!mapStore.isSimpleRouteFirstPersonCamera) return;
@@ -234,6 +246,7 @@ async function handleSimpleRoute() {
 		routeMessage.value = summary.isApproximate
 			? "無法取得道路路線，已改用直線估算"
 			: "路線已標示";
+		mapStore.fetchNavigationRouteAiComment();
 		gtag("event", "map_actions", {
 			action_type: "簡易導航",
 			time: Date.now(),
@@ -265,10 +278,14 @@ watch(
 	(summary) => {
 		if (summary) {
 			isCameraPanelCollapsed.value = true;
-		} else {
-			isCameraPanelCollapsed.value = false;
 		}
+		nextTick(updateNavigationPanelTop);
 	},
+);
+
+watch(
+	[isCameraPanelCollapsed, isRoutePanelOpen],
+	() => nextTick(updateNavigationPanelTop),
 );
 
 onMounted(() => {
@@ -276,22 +293,29 @@ onMounted(() => {
 	route.query.city 
 		? mapStore.updateMapViewForCity(route.query.city)
 		: mapStore.updateMapViewForCity('default');
+	nextTick(() => {
+		updateNavigationPanelTop();
+		if (window.ResizeObserver && cameraPanelRef.value) {
+			cameraPanelResizeObserver = new window.ResizeObserver(
+				updateNavigationPanelTop,
+			);
+			cameraPanelResizeObserver.observe(cameraPanelRef.value);
+		}
+	});
+	window.addEventListener("resize", updateNavigationPanelTop);
 	window.addEventListener("keydown", onSimpleRouteDriveKeydown);
 });
 
 onUnmounted(() => {
+	cameraPanelResizeObserver?.disconnect();
+	window.removeEventListener("resize", updateNavigationPanelTop);
 	window.removeEventListener("keydown", onSimpleRouteDriveKeydown);
 });
 </script>
 
 <template>
   <div class="mapcontainer">
-    <div
-      class="mapcontainer-map"
-      :class="{
-        'mapcontainer-map--nav-below-camera-tools': shiftNavigationBelowCamera,
-      }"
-    >
+    <div class="mapcontainer-map">
       <!-- #mapboxBox needs to be empty to ensure Mapbox performance -->
       <div id="mapboxBox" />
       <div class="mapcontainer-layers">
@@ -313,6 +337,7 @@ onUnmounted(() => {
       <form
         v-if="isRoutePanelOpen"
         class="mapcontainer-navigation hide-if-mobile"
+        :style="navigationPanelStyle"
         @submit.prevent="handleSimpleRoute"
       >
         <div class="mapcontainer-navigation-heading">
@@ -457,28 +482,23 @@ onUnmounted(() => {
         </div>
       </div>
       <div
+        ref="cameraPanelRef"
         class="mapcontainer-camera hide-if-mobile"
         :class="{
-          'mapcontainer-camera--has-route':
-            !!mapStore.navigationRouteSummary,
           'mapcontainer-camera--motion-collapsed':
-            !!mapStore.navigationRouteSummary &&
             isCameraPanelCollapsed,
         }"
         aria-label="地圖攝影機控制"
       >
-        <div
-          v-if="mapStore.navigationRouteSummary"
-          class="mapcontainer-camera-routebar"
-        >
+        <div class="mapcontainer-camera-routebar">
           <button
             class="mapcontainer-camera-routebar-toggle"
             type="button"
             :aria-expanded="!isCameraPanelCollapsed"
             :title="
               isCameraPanelCollapsed
-                ? '展開 VIEW / 平移 / 縮放 / 旋轉'
-                : '收起 VIEW / 平移 / 縮放 / 旋轉'
+                ? '展開控制面板'
+                : '收起控制面板'
             "
             @click="isCameraPanelCollapsed = !isCameraPanelCollapsed"
           >
@@ -748,10 +768,6 @@ onUnmounted(() => {
 			display: none;
 		}
 
-		&--nav-below-camera-tools .mapcontainer-navigation {
-			top: 252px;
-			max-height: calc(100% - 276px);
-		}
 	}
 
 	&-controls {
@@ -977,30 +993,37 @@ onUnmounted(() => {
 
 		&-profiles {
 			display: grid;
-			grid-template-columns: repeat(3, minmax(0, 1fr));
-			gap: 6px;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 8px;
 		}
 
-		&-profile {
-			height: 34px;
+		&-profile,
+		&-view-toggle {
+			min-width: 0;
+			height: 42px;
+			min-height: 42px;
+			padding: 0 12px;
 			display: flex;
 			align-items: center;
 			justify-content: center;
-			gap: 4px;
-			min-width: 0;
-			border: 1px solid rgba(244, 242, 235, 0.32);
+			gap: 6px;
+			border: 1px solid rgba(244, 242, 235, 0.34);
 			background-color: rgba(255, 255, 255, 0.045);
-			color: rgba(244, 242, 235, 0.76);
-			font-size: 0.76rem;
+			color: rgba(244, 242, 235, 0.78);
+			font-size: 0.8rem;
 			font-weight: 700;
+			line-height: 1.15;
+			white-space: nowrap;
 			transition:
 				border-color 0.18s,
 				background-color 0.18s,
 				color 0.18s;
 
 			span {
+				flex: 0 0 auto;
 				font-family: var(--font-icon);
-				font-size: 1rem;
+				font-size: 1.08rem;
+				line-height: 1;
 			}
 
 			&:hover,
@@ -1013,50 +1036,27 @@ onUnmounted(() => {
 
 		&-view {
 			display: grid;
-			grid-template-columns: auto minmax(0, 1fr);
-			gap: 8px;
-			align-items: center;
+			gap: 6px;
+			align-items: stretch;
 
 			> span {
 				color: rgba(244, 242, 235, 0.52);
 				font-size: 0.64rem;
 				font-weight: 700;
+				line-height: 1;
 			}
 
 			&-actions {
 				display: grid;
-				grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-				gap: 6px;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 8px;
 				min-width: 0;
 			}
 
 			&-toggle {
-				height: 34px;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				gap: 6px;
-				min-width: 0;
-				border: 1px solid rgba(244, 242, 235, 0.34);
-				background-color: rgba(255, 255, 255, 0.045);
-				color: rgba(244, 242, 235, 0.78);
-				font-size: 0.76rem;
-				font-weight: 700;
-				transition:
-					border-color 0.18s,
-					background-color 0.18s,
-					color 0.18s;
-
-				span {
-					font-family: var(--font-icon);
-					font-size: 1rem;
-				}
-
 				&:hover,
 				&--active {
-					border-color: rgba(255, 78, 203, 0.95);
 					background-color: rgba(255, 78, 203, 0.2);
-					color: #fff;
 				}
 
 				&:disabled {
@@ -1239,7 +1239,7 @@ onUnmounted(() => {
 		z-index: 6;
 		display: grid;
 		grid-template-columns: 60px 60px minmax(280px, 1fr);
-		grid-template-rows: auto;
+		grid-template-rows: auto auto;
 		gap: 10px;
 		align-items: stretch;
 		width: min(630px, calc(100vw - 500px));
@@ -1249,10 +1249,6 @@ onUnmounted(() => {
 		background-color: rgba(0, 0, 0, 0.66);
 		box-shadow: 0 0 24px rgba(255, 255, 255, 0.12);
 		backdrop-filter: blur(4px);
-
-		&--has-route {
-			grid-template-rows: auto auto;
-		}
 
 		&--motion-collapsed {
 			grid-template-columns: 60px 60px;

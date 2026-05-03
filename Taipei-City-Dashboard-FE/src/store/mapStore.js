@@ -221,6 +221,40 @@ function isRoadSpeedLimitLookupCanceled(error) {
 function isRoadSpeedLimitRateLimited(error) {
 	return Number(error?.response?.status) === 429;
 }
+
+function getNavigationGeoJsonEndpoint() {
+	const apiUrl = import.meta.env.VITE_API_URL || "";
+	return `${apiUrl.replace(/\/$/, "")}/navigation/geojson`;
+}
+
+function buildSimpleRouteGeoJson(routeData) {
+	return {
+		type: "FeatureCollection",
+		features: [
+			{
+				type: "Feature",
+				properties: {
+					start_name: routeData.start.name,
+					end_name: routeData.end.name,
+					distance: routeData.distance,
+					duration: routeData.duration,
+					profile: routeData.profile,
+					is_approximate: routeData.isApproximate,
+				},
+				geometry: routeData.geometry,
+			},
+		],
+	};
+}
+
+function getNavigationAiComment(payload) {
+	return (
+		payload?.ai?.content ||
+		payload?.data?.comment ||
+		payload?.comment ||
+		""
+	);
+}
 const FUTURE_HOUR_RAIN_LAYER_INDEX = "future_hour_rain";
 const RAIN_ANIMATION_LAYER_SUFFIX = "-rain-animation";
 const RAIN_ANIMATION_MIN_DROPS = 1200;
@@ -1396,6 +1430,11 @@ export const useMapStore = defineStore("map", {
 		hiddenMotionLabelLayers: {},
 		navigationRouteMarkers: [],
 		navigationRouteSummary: null,
+		navigationRouteGeoJson: null,
+		navigationRouteAiComment: "",
+		navigationRouteAiCommentStatus: "idle",
+		navigationRouteAiCommentError: "",
+		navigationRouteAiCommentRequestId: 0,
 		navigationRouteCarSample: null,
 		navigationRouteCarLayer: null,
 		navigationRouteCarZoomHandler: null,
@@ -1441,6 +1480,11 @@ export const useMapStore = defineStore("map", {
 			this.hiddenMotionLabelLayers = {};
 			this.navigationRouteMarkers = [];
 			this.navigationRouteSummary = null;
+			this.navigationRouteGeoJson = null;
+			this.navigationRouteAiComment = "";
+			this.navigationRouteAiCommentStatus = "idle";
+			this.navigationRouteAiCommentError = "";
+			this.navigationRouteAiCommentRequestId += 1;
 			this.navigationRouteCarSample = null;
 			this.navigationRouteCarLayer = null;
 			this.navigationRouteCarZoomHandler = null;
@@ -4219,6 +4263,65 @@ export const useMapStore = defineStore("map", {
 
 			return this.navigationRouteSummary;
 		},
+		async fetchNavigationRouteAiComment() {
+			if (!this.navigationRouteGeoJson) {
+				this.navigationRouteAiComment = "";
+				this.navigationRouteAiCommentStatus = "idle";
+				this.navigationRouteAiCommentError = "";
+				return "";
+			}
+
+			const authStore = useAuthStore();
+			if (!authStore.token) {
+				this.navigationRouteAiComment =
+					"登入後可生成 AI 路線評論";
+				this.navigationRouteAiCommentStatus = "error";
+				this.navigationRouteAiCommentError = "";
+				return this.navigationRouteAiComment;
+			}
+
+			const requestId = this.navigationRouteAiCommentRequestId + 1;
+			this.navigationRouteAiCommentRequestId = requestId;
+			this.navigationRouteAiComment = "";
+			this.navigationRouteAiCommentStatus = "loading";
+			this.navigationRouteAiCommentError = "";
+
+			try {
+				const response = await fetch(getNavigationGeoJsonEndpoint(), {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${authStore.token}`,
+					},
+					body: JSON.stringify(this.navigationRouteGeoJson),
+				});
+				const payload = await response.json();
+				if (!response.ok) {
+					throw new Error(
+						payload?.message || `HTTP ${response.status}`,
+					);
+				}
+
+				const comment = getNavigationAiComment(payload);
+				if (this.navigationRouteAiCommentRequestId !== requestId) {
+					return "";
+				}
+				this.navigationRouteAiComment =
+					comment || "AI 尚未提供路線評論";
+				this.navigationRouteAiCommentStatus = "success";
+				return this.navigationRouteAiComment;
+			} catch (error) {
+				if (this.navigationRouteAiCommentRequestId !== requestId) {
+					return "";
+				}
+				console.error("Failed to fetch navigation AI comment:", error);
+				this.navigationRouteAiComment = "";
+				this.navigationRouteAiCommentStatus = "error";
+				this.navigationRouteAiCommentError =
+					"AI 路線評論暫時無法生成";
+				return "";
+			}
+		},
 		createSimpleRouteMarker(label, coordinates, variant) {
 			if (!this.map) return null;
 			const markerElement = document.createElement("div");
@@ -4683,6 +4786,7 @@ export const useMapStore = defineStore("map", {
 				return;
 			}
 			this.clearSimpleRoute({ preserveFirstPersonCamera: true });
+			this.navigationRouteGeoJson = buildSimpleRouteGeoJson(routeData);
 
 			this.map.addSource(SIMPLE_ROUTE_SOURCE_ID, {
 				type: "geojson",
@@ -4883,6 +4987,11 @@ export const useMapStore = defineStore("map", {
 				}
 			}
 			this.navigationRouteSummary = null;
+			this.navigationRouteGeoJson = null;
+			this.navigationRouteAiComment = "";
+			this.navigationRouteAiCommentStatus = "idle";
+			this.navigationRouteAiCommentError = "";
+			this.navigationRouteAiCommentRequestId += 1;
 			if (!preserveFirstPersonCamera) {
 				this.isSimpleRouteFirstPersonCamera = false;
 				this.simpleRouteCameraSnapshot = null;

@@ -78,6 +78,23 @@ const mapComponentCount = computed(
 		(parseMapLayers.value.hasMap?.length || 0) +
 		(contentStore.mapLayers?.length || 0),
 );
+const routeAiCommentPanelText = computed(() => {
+	const status = mapStore.navigationRouteAiCommentStatus;
+	if (status === "loading") return "AI 正在分析路線沿線資料...";
+	if (status === "error") {
+		return (
+			mapStore.navigationRouteAiCommentError ||
+			mapStore.navigationRouteAiComment ||
+			"AI 路線評論暫時無法生成"
+		);
+	}
+	return mapStore.navigationRouteAiComment;
+});
+const showRouteAiCommentPanel = computed(
+	() =>
+		mapStore.navigationRouteAiCommentStatus !== "idle" &&
+		!!routeAiCommentPanelText.value,
+);
 
 function togglePanel() {
 	isPanelOpen.value = !isPanelOpen.value;
@@ -195,6 +212,22 @@ function popularBasicLayerGA(map_config) {
           <em>{{ mapComponentCount }}</em>
         </button>
       </div>
+    </div>
+    <div
+      v-if="showRouteAiCommentPanel"
+      class="map-route-comment hide-if-mobile"
+      :class="{
+        'map-route-comment--loading':
+          mapStore.navigationRouteAiCommentStatus === 'loading',
+        'map-route-comment--error':
+          mapStore.navigationRouteAiCommentStatus === 'error',
+      }"
+    >
+      <div class="map-route-comment-heading">
+        <span>AI COMMENT</span>
+        <strong>路線研判</strong>
+      </div>
+      <p>{{ routeAiCommentPanelText }}</p>
     </div>
     <div
       v-if="isPanelOpen"
@@ -802,6 +835,67 @@ function popularBasicLayerGA(map_config) {
 				background-color: rgba(255, 255, 255, 0.12);
 				color: #fff;
 			}
+		}
+	}
+
+	&-route-comment {
+		position: absolute;
+		left: 30px;
+		bottom: 58px;
+		z-index: 31;
+		width: min(420px, calc(100vw - 60px));
+		max-height: min(230px, calc(100% - 260px));
+		box-sizing: border-box;
+		padding: 14px;
+		border: 1px solid rgba(244, 242, 235, 0.48);
+		background-color: rgba(0, 0, 0, 0.74);
+		box-shadow: 0 0 24px rgba(255, 78, 203, 0.16);
+		backdrop-filter: blur(4px);
+		color: #f4f2eb;
+		font-family: Consolas, "Courier New", monospace;
+		overflow-y: auto;
+		pointer-events: auto;
+
+		&--loading {
+			border-color: rgba(255, 78, 203, 0.72);
+		}
+
+		&--error {
+			border-color: rgba(255, 95, 95, 0.7);
+			box-shadow: 0 0 18px rgba(255, 95, 95, 0.16);
+		}
+
+		&-heading {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			margin-bottom: 8px;
+
+			span {
+				color: rgba(244, 242, 235, 0.52);
+				font-size: 0.64rem;
+				font-weight: 800;
+				line-height: 1;
+			}
+
+			strong {
+				min-width: 0;
+				color: #fff;
+				font-size: 0.9rem;
+				font-weight: 800;
+				line-height: 1.2;
+			}
+		}
+
+		p {
+			margin: 0;
+			color: rgba(244, 242, 235, 0.82);
+			font-size: 0.82rem;
+			font-weight: 700;
+			line-height: 1.55;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
 		}
 	}
 
