@@ -46,7 +46,48 @@ type OverlapResult struct {
 
 // Cache for loaded GeoJSON files to avoid repeated disk reads
 var geoJSONCache = map[string]interface{}{}
+var compiledGeoJSONCache = map[string]*compiledReferenceFile{}
 var cacheMutex sync.RWMutex
+
+type geoBBox struct {
+	minX  float64
+	minY  float64
+	maxX  float64
+	maxY  float64
+	valid bool
+}
+
+type compiledSegment struct {
+	a    [2]float64
+	b    [2]float64
+	bbox geoBBox
+}
+
+type compiledPolygonRing struct {
+	points   [][2]float64
+	segments []compiledSegment
+	bbox     geoBBox
+}
+
+type compiledReferenceFeature struct {
+	raw          interface{}
+	bbox         geoBBox
+	polygonRings []compiledPolygonRing
+	lineSegments []compiledSegment
+	points       [][2]float64
+}
+
+type compiledReferenceFile struct {
+	features []compiledReferenceFeature
+}
+
+type compiledRouteFeature struct {
+	points   [][2]float64
+	segments []compiledSegment
+	bbox     geoBBox
+	cellSize float64
+	grid     map[[2]int][]int
+}
 
 // HandleNavigationGeoJSON processes incoming navigation GeoJSON data
 // POST /api/v1/navigation/geojson
@@ -208,11 +249,11 @@ func HandleNavigationGeoJSON(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":         response.Status,
-		"message":        response.Message,
+		"status":  response.Status,
+		"message": response.Message,
 		"ai": gin.H{
-			"session":  logEntry.SessionID,
-			"content":  logEntry.Answer,
+			"session": logEntry.SessionID,
+			"content": logEntry.Answer,
 			"usage": gin.H{
 				"input_tokens":  logEntry.InputTokens,
 				"output_tokens": logEntry.OutputTokens,
@@ -239,42 +280,490 @@ func generateSimpleID() string {
 // For each reference file, it returns the features (e.g. districts, zones) that
 // the route geometry intersects.
 func processOverlapDetection(navFeatures []interface{}, referenceFiles []string) ([]OverlapResult, error) {
-	var results []OverlapResult
+	routes := compileNavigationRouteFeatures(navFeatures)
+	if len(routes) == 0 || len(referenceFiles) == 0 {
+		return []OverlapResult{}, nil
+	}
 
-	for _, refFile := range referenceFiles {
-		refData, err := loadGeoJSONFile(refFile)
-		if err != nil {
-			log.Printf("[Navigation] 無法載入參考檔案 %s: %v", refFile, err)
-			continue
-		}
+	resultSlots := make([]OverlapResult, len(referenceFiles))
+	hasResult := make([]bool, len(referenceFiles))
+	var wg sync.WaitGroup
 
-		refFeatures, err := extractFeaturesFromGeoJSON(refData)
-		if err != nil {
-			log.Printf("[Navigation] 無法解析 features %s: %v", refFile, err)
-			continue
-		}
+	for index, refFile := range referenceFiles {
+		wg.Add(1)
+		go func(index int, refFile string) {
+			defer wg.Done()
 
-		// Collect reference features that the route crosses
-		var crossedFeatures []interface{}
-		for _, refFeature := range refFeatures {
-			for _, navFeature := range navFeatures {
-				if routeIntersectsFeature(navFeature, refFeature) {
-					crossedFeatures = append(crossedFeatures, refFeature)
-					break // 同一個 refFeature 只加一次
-				}
+			compiledFile, err := loadCompiledGeoJSONFile(refFile)
+			if err != nil {
+				log.Printf("[Navigation] 無法載入參考檔案 %s: %v", refFile, err)
+				return
 			}
-		}
 
-		if len(crossedFeatures) > 0 {
-			results = append(results, OverlapResult{
+			crossedFeatures := findCrossedReferenceFeatures(routes, compiledFile.features)
+			if len(crossedFeatures) == 0 {
+				return
+			}
+
+			resultSlots[index] = OverlapResult{
 				ReferenceFile:       refFile,
 				OverlappingFeatures: crossedFeatures,
 				OverlapCount:        len(crossedFeatures),
-			})
+			}
+			hasResult[index] = true
+		}(index, refFile)
+	}
+
+	wg.Wait()
+
+	results := make([]OverlapResult, 0, len(referenceFiles))
+	for index, result := range resultSlots {
+		if hasResult[index] {
+			results = append(results, result)
 		}
 	}
 
 	return results, nil
+}
+
+func compileNavigationRouteFeatures(navFeatures []interface{}) []compiledRouteFeature {
+	var routes []compiledRouteFeature
+
+	for _, navFeature := range navFeatures {
+		routeGeom := extractGeometry(navFeature)
+		if routeGeom == nil {
+			continue
+		}
+
+		routeType, _ := routeGeom["type"].(string)
+		switch routeType {
+		case "LineString":
+			if route := compileRouteLine(extractPointList(routeGeom["coordinates"])); route != nil {
+				routes = append(routes, *route)
+			}
+		case "MultiLineString":
+			for _, line := range extractLineStrings(routeGeom["coordinates"]) {
+				if route := compileRouteLine(line); route != nil {
+					routes = append(routes, *route)
+				}
+			}
+		}
+	}
+
+	return routes
+}
+
+func compileRouteLine(points [][2]float64) *compiledRouteFeature {
+	if len(points) < 2 {
+		return nil
+	}
+
+	segments := compileSegments(points, false)
+	if len(segments) == 0 {
+		return nil
+	}
+
+	route := &compiledRouteFeature{
+		points:   points,
+		segments: segments,
+		bbox:     bboxFromPoints(points),
+		grid:     make(map[[2]int][]int, len(segments)*2),
+	}
+	route.cellSize = routeGridCellSize(route.bbox)
+	route.indexSegments()
+	return route
+}
+
+func loadCompiledGeoJSONFile(filename string) (*compiledReferenceFile, error) {
+	cacheMutex.RLock()
+	if compiled, exists := compiledGeoJSONCache[filename]; exists {
+		cacheMutex.RUnlock()
+		return compiled, nil
+	}
+	cacheMutex.RUnlock()
+
+	refData, err := loadGeoJSONFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	refFeatures, err := extractFeaturesFromGeoJSON(refData)
+	if err != nil {
+		return nil, fmt.Errorf("無法解析 features %s: %w", filename, err)
+	}
+
+	compiled := &compiledReferenceFile{
+		features: compileReferenceFeatures(refFeatures),
+	}
+
+	cacheMutex.Lock()
+	compiledGeoJSONCache[filename] = compiled
+	cacheMutex.Unlock()
+
+	return compiled, nil
+}
+
+func compileReferenceFeatures(refFeatures []interface{}) []compiledReferenceFeature {
+	compiledFeatures := make([]compiledReferenceFeature, 0, len(refFeatures))
+
+	for _, refFeature := range refFeatures {
+		refGeom := extractGeometry(refFeature)
+		if refGeom == nil {
+			continue
+		}
+
+		refType, _ := refGeom["type"].(string)
+		compiled := compiledReferenceFeature{
+			raw:  refFeature,
+			bbox: bboxFromCoordinates(refGeom["coordinates"]),
+		}
+		if !compiled.bbox.valid {
+			continue
+		}
+
+		switch refType {
+		case "Polygon":
+			compiled.polygonRings = compilePolygonRings(refGeom["coordinates"])
+		case "MultiPolygon":
+			compiled.polygonRings = compileMultiPolygonRings(refGeom["coordinates"])
+		case "LineString":
+			compiled.lineSegments = compileSegments(extractPointList(refGeom["coordinates"]), false)
+		case "MultiLineString":
+			for _, line := range extractLineStrings(refGeom["coordinates"]) {
+				compiled.lineSegments = append(
+					compiled.lineSegments,
+					compileSegments(line, false)...,
+				)
+			}
+		case "Point":
+			compiled.points = append(compiled.points, extractSinglePoint(refGeom["coordinates"]))
+		case "MultiPoint":
+			compiled.points = extractPointList(refGeom["coordinates"])
+		}
+
+		if len(compiled.polygonRings) == 0 &&
+			len(compiled.lineSegments) == 0 &&
+			len(compiled.points) == 0 {
+			continue
+		}
+		compiledFeatures = append(compiledFeatures, compiled)
+	}
+
+	return compiledFeatures
+}
+
+func compilePolygonRings(coords interface{}) []compiledPolygonRing {
+	rings := extractRings(coords)
+	if len(rings) == 0 {
+		return nil
+	}
+	return compileOuterPolygonRing(rings[0])
+}
+
+func compileMultiPolygonRings(coords interface{}) []compiledPolygonRing {
+	polygons := extractMultiPolygonRings(coords)
+	compiledRings := make([]compiledPolygonRing, 0, len(polygons))
+	for _, rings := range polygons {
+		if len(rings) == 0 {
+			continue
+		}
+		compiledRings = append(compiledRings, compileOuterPolygonRing(rings[0])...)
+	}
+	return compiledRings
+}
+
+func compileOuterPolygonRing(points [][2]float64) []compiledPolygonRing {
+	if len(points) < 3 {
+		return nil
+	}
+
+	segments := compileSegments(points, true)
+	if len(segments) == 0 {
+		return nil
+	}
+
+	return []compiledPolygonRing{
+		{
+			points:   points,
+			segments: segments,
+			bbox:     bboxFromPoints(points),
+		},
+	}
+}
+
+func compileSegments(points [][2]float64, closeRing bool) []compiledSegment {
+	if len(points) < 2 {
+		return nil
+	}
+
+	segmentCount := len(points) - 1
+	if closeRing && points[0] != points[len(points)-1] {
+		segmentCount++
+	}
+
+	segments := make([]compiledSegment, 0, segmentCount)
+	for i := 0; i < len(points)-1; i++ {
+		segments = append(segments, newCompiledSegment(points[i], points[i+1]))
+	}
+	if closeRing && points[0] != points[len(points)-1] {
+		segments = append(segments, newCompiledSegment(points[len(points)-1], points[0]))
+	}
+	return segments
+}
+
+func newCompiledSegment(a, b [2]float64) compiledSegment {
+	return compiledSegment{
+		a:    a,
+		b:    b,
+		bbox: bboxFromPoints([][2]float64{a, b}),
+	}
+}
+
+func findCrossedReferenceFeatures(routes []compiledRouteFeature, refFeatures []compiledReferenceFeature) []interface{} {
+	crossedFeatures := make([]interface{}, 0)
+
+	for _, refFeature := range refFeatures {
+		for routeIndex := range routes {
+			if routeIntersectsCompiledFeature(&routes[routeIndex], &refFeature) {
+				crossedFeatures = append(crossedFeatures, refFeature.raw)
+				break
+			}
+		}
+	}
+
+	return crossedFeatures
+}
+
+func routeIntersectsCompiledFeature(route *compiledRouteFeature, refFeature *compiledReferenceFeature) bool {
+	if route == nil || refFeature == nil || !geoBoxesOverlap(route.bbox, refFeature.bbox) {
+		return false
+	}
+
+	for _, refPoint := range refFeature.points {
+		if routeIntersectsPoint(route, refPoint) {
+			return true
+		}
+	}
+
+	for _, refSegment := range refFeature.lineSegments {
+		if routeIntersectsSegment(route, refSegment) {
+			return true
+		}
+	}
+
+	for _, ring := range refFeature.polygonRings {
+		if routeIntersectsPolygonRing(route, ring) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func routeIntersectsPolygonRing(route *compiledRouteFeature, ring compiledPolygonRing) bool {
+	if !geoBoxesOverlap(route.bbox, ring.bbox) {
+		return false
+	}
+
+	for _, edge := range ring.segments {
+		if routeIntersectsSegment(route, edge) {
+			return true
+		}
+	}
+
+	for _, routePoint := range route.points {
+		if bboxContainsPoint(ring.bbox, routePoint) && pointInPolygon(routePoint, ring.points) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func routeIntersectsSegment(route *compiledRouteFeature, refSegment compiledSegment) bool {
+	if !geoBoxesOverlap(route.bbox, refSegment.bbox) {
+		return false
+	}
+
+	for _, routeSegment := range route.querySegments(refSegment.bbox) {
+		if geoBoxesOverlap(routeSegment.bbox, refSegment.bbox) &&
+			segmentsIntersect(routeSegment.a, routeSegment.b, refSegment.a, refSegment.b) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeIntersectsPoint(route *compiledRouteFeature, refPoint [2]float64) bool {
+	const threshold = 0.0001
+	pointBox := expandBBox(bboxFromPoints([][2]float64{refPoint}), threshold)
+	if !geoBoxesOverlap(route.bbox, pointBox) {
+		return false
+	}
+
+	for _, routeSegment := range route.querySegments(pointBox) {
+		if pointNearSegment(refPoint, routeSegment.a, routeSegment.b, threshold) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeGridCellSize(bbox geoBBox) float64 {
+	const minCellSize = 0.001
+	const maxCellSize = 0.01
+
+	width := bbox.maxX - bbox.minX
+	height := bbox.maxY - bbox.minY
+	size := math.Max(width, height) / 80
+	if !bbox.valid || !isFinitePositive(size) {
+		return minCellSize
+	}
+	return math.Max(minCellSize, math.Min(maxCellSize, size))
+}
+
+func isFinitePositive(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value > 0
+}
+
+func (route *compiledRouteFeature) indexSegments() {
+	if route == nil || !route.bbox.valid || route.cellSize <= 0 {
+		return
+	}
+
+	for index, segment := range route.segments {
+		minCellX, minCellY, maxCellX, maxCellY := route.cellRange(segment.bbox)
+		for cellX := minCellX; cellX <= maxCellX; cellX++ {
+			for cellY := minCellY; cellY <= maxCellY; cellY++ {
+				key := [2]int{cellX, cellY}
+				route.grid[key] = append(route.grid[key], index)
+			}
+		}
+	}
+}
+
+func (route *compiledRouteFeature) querySegments(bbox geoBBox) []compiledSegment {
+	if route == nil || !bbox.valid || !geoBoxesOverlap(route.bbox, bbox) {
+		return nil
+	}
+
+	minCellX, minCellY, maxCellX, maxCellY := route.cellRange(bbox)
+	seen := make(map[int]struct{})
+	segments := make([]compiledSegment, 0)
+
+	for cellX := minCellX; cellX <= maxCellX; cellX++ {
+		for cellY := minCellY; cellY <= maxCellY; cellY++ {
+			for _, segmentIndex := range route.grid[[2]int{cellX, cellY}] {
+				if _, exists := seen[segmentIndex]; exists {
+					continue
+				}
+				seen[segmentIndex] = struct{}{}
+				segments = append(segments, route.segments[segmentIndex])
+			}
+		}
+	}
+
+	return segments
+}
+
+func (route *compiledRouteFeature) cellRange(bbox geoBBox) (int, int, int, int) {
+	minCellX := int(math.Floor((bbox.minX - route.bbox.minX) / route.cellSize))
+	minCellY := int(math.Floor((bbox.minY - route.bbox.minY) / route.cellSize))
+	maxCellX := int(math.Floor((bbox.maxX - route.bbox.minX) / route.cellSize))
+	maxCellY := int(math.Floor((bbox.maxY - route.bbox.minY) / route.cellSize))
+	return minCellX, minCellY, maxCellX, maxCellY
+}
+
+func bboxFromCoordinates(coords interface{}) geoBBox {
+	var bbox geoBBox
+
+	var visit func(interface{})
+	visit = func(value interface{}) {
+		switch typedValue := value.(type) {
+		case []interface{}:
+			if len(typedValue) >= 2 {
+				x, okX := typedValue[0].(float64)
+				y, okY := typedValue[1].(float64)
+				if okX && okY {
+					bbox = extendBBox(bbox, [2]float64{x, y})
+					return
+				}
+			}
+			for _, item := range typedValue {
+				visit(item)
+			}
+		case map[string]interface{}:
+			for _, item := range typedValue {
+				visit(item)
+			}
+		}
+	}
+
+	visit(coords)
+	return bbox
+}
+
+func bboxFromPoints(points [][2]float64) geoBBox {
+	var bbox geoBBox
+	for _, point := range points {
+		bbox = extendBBox(bbox, point)
+	}
+	return bbox
+}
+
+func extendBBox(bbox geoBBox, point [2]float64) geoBBox {
+	if !bbox.valid {
+		return geoBBox{
+			minX:  point[0],
+			minY:  point[1],
+			maxX:  point[0],
+			maxY:  point[1],
+			valid: true,
+		}
+	}
+	if point[0] < bbox.minX {
+		bbox.minX = point[0]
+	}
+	if point[0] > bbox.maxX {
+		bbox.maxX = point[0]
+	}
+	if point[1] < bbox.minY {
+		bbox.minY = point[1]
+	}
+	if point[1] > bbox.maxY {
+		bbox.maxY = point[1]
+	}
+	return bbox
+}
+
+func expandBBox(bbox geoBBox, amount float64) geoBBox {
+	if !bbox.valid {
+		return bbox
+	}
+	bbox.minX -= amount
+	bbox.minY -= amount
+	bbox.maxX += amount
+	bbox.maxY += amount
+	return bbox
+}
+
+func geoBoxesOverlap(a, b geoBBox) bool {
+	if !a.valid || !b.valid {
+		return false
+	}
+	if a.maxX < b.minX || b.maxX < a.minX {
+		return false
+	}
+	if a.maxY < b.minY || b.maxY < a.minY {
+		return false
+	}
+	return true
+}
+
+func bboxContainsPoint(bbox geoBBox, point [2]float64) bool {
+	return bbox.valid &&
+		bbox.minX <= point[0] && point[0] <= bbox.maxX &&
+		bbox.minY <= point[1] && point[1] <= bbox.maxY
 }
 
 // ─── Geometry Intersection ────────────────────────────────────────────────────
@@ -475,6 +964,22 @@ func extractPointList(coords interface{}) [][2]float64 {
 		}
 	}
 	return result
+}
+
+// extractLineStrings converts a MultiLineString coordinates array to line point lists.
+func extractLineStrings(coords interface{}) [][][2]float64 {
+	arr, ok := coords.([]interface{})
+	if !ok {
+		return nil
+	}
+	var lines [][][2]float64
+	for _, line := range arr {
+		points := extractPointList(line)
+		if len(points) > 0 {
+			lines = append(lines, points)
+		}
+	}
+	return lines
 }
 
 // extractRings converts a Polygon coordinates array to rings of points

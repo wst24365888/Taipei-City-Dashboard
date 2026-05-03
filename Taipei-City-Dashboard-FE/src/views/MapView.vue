@@ -713,6 +713,8 @@ function popularBasicLayerGA(map_config) {
 
 <style scoped lang="scss">
 .map {
+	--map-lower-left-offset: 18px;
+
 	height: 100%;
 	min-height: 0;
 	position: relative;
@@ -840,10 +842,13 @@ function popularBasicLayerGA(map_config) {
 
 	&-route-comment {
 		position: absolute;
-		left: 30px;
+		left: var(--map-lower-left-offset);
 		bottom: 58px;
 		z-index: 31;
-		width: min(420px, calc(100vw - 60px));
+		width: min(
+			420px,
+			calc(100vw - var(--map-lower-left-offset) * 2)
+		);
 		max-height: min(230px, calc(100% - 260px));
 		box-sizing: border-box;
 		padding: 14px;
